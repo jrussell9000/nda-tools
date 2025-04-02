@@ -15,7 +15,8 @@ from shutil import copyfile
 from threading import Thread
 
 import pandas as pd
-from boto3.s3.transfer import TransferConfig
+import boto3.s3.transfer as s3transfer
+from botocore.config import Config
 from requests import HTTPError
 
 import NDATools
@@ -504,7 +505,9 @@ class Download(Protocol):
                                      aws_session_token=sess_token,
                                      region_name='us-east-1')
 
-        s3_client = sess.client('s3')
+        client_config = Config(max_pool_connections=self.thread_num)
+        
+        s3_client = sess.client('s3', config=client_config)
         response = s3_client.head_object(Bucket=src_bucket, Key=src_path)
         download_request.actual_file_size = response['ContentLength']
         download_request.e_tag = response['ETag'].replace('"', '')
@@ -526,18 +529,17 @@ class Download(Protocol):
             'ExtraArgs': {'ACL': 'bucket-owner-full-control'}
         }
 
+        config = s3transfer.TransferConfig(multipart_threshold=LARGE_OBJECT_THRESHOLD, multipart_chunksize=1 * GB, max_concurrency=self.thread_num)
+        s3t = s3transfer.create_transfer_manager(s3_client, config=config)
         if int(download_request.actual_file_size) >= LARGE_OBJECT_THRESHOLD:
             logger.info('Transferring large object {} ({}) in multiple parts'
                         .format(download_request.nda_s3_url,
                                 Utils.human_size(int(download_request.actual_file_size))))
-            config = TransferConfig(multipart_threshold=LARGE_OBJECT_THRESHOLD, multipart_chunksize=1 * GB)
-            args['Config'] = config
-            args['Callback'] = print_upload_part_info
-
-        s3.meta.client.copy(copy_source,
-                            dest_bucket,
-                            dest_path,
-                            **args)
+        s3t.copy(copy_source = copy_source,
+                 bucket = dest_bucket,
+                 key = dest_path,
+                 subscribers=[
+                     s3transfer.ProgressCallbackInvoker(print_upload_part_info)])
 
     def handle_download_exception(self, download_request, e, download_local, err_if_exists, package_file, failed_s3_links_file=None):
         if not download_request.presigned_url and download_local:
